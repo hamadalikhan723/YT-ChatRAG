@@ -1,87 +1,52 @@
-import streamlit as st
+import re
+from youtube_transcript_api import YouTubeTranscriptApi
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 
-# Safely import LangChain runnables across different version schemas
-try:
-    from langchain_core.runnables import RunnableParallel, RunnablePassthrough, RunnableLambda
-except ImportError:
-    try:
-        from langchain.schema.runnable import RunnableParallel, RunnablePassthrough, RunnableLambda
-    except ImportError:
-        from langchain_core.runnables.base import RunnableParallel, RunnablePassthrough, RunnableLambda
 
-# --- Webpage Setup ---
-st.set_page_config(page_title="YouTube Chatbot RAG", page_icon="📺", layout="wide")
-st.title("📺 YouTube Video Transcript Chatbot")
-st.write("Chat with any YouTube Video using a local RAG Pipeline!")
+def extract_video_id(url_or_id: str):
+    """Accepts a YouTube link or a plain video ID."""
+    url_or_id = url_or_id.strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", url_or_id):
+        return url_or_id
+    match = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([A-Za-z0-9_-]{11})", url_or_id)
+    return match.group(1) if match else None
 
-# --- Cache Models across Sessions ---
 
-# --- Initialize Chat & Retriever State ---
-if "retriever" not in st.session_state:
-    st.session_state.retriever = None
-if "chain" not in st.session_state:
-    st.session_state.chain = None
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+def load_rag_components():
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# --- Sidebar for Loading Youtube URL ---
-with st.sidebar:
-    st.header("1. Load YouTube Video")
-    video_input = st.text_input("Paste YouTube Link / ID", value="ynbvBYtqwYY")
+    llm = HuggingFacePipeline.from_model_id(
+        model_id="Qwen/Qwen2.5-0.5B-Instruct",
+        task="text-generation",
+        pipeline_kwargs={"max_new_tokens": 256, "do_sample": False},
+    )
 
-    if st.button("Load & Index Video", type="primary"):
-        video_id = extract_video_id(video_input)
-        if video_id:
-            with st.spinner("Processing video transcript..."):
-                try:
-                    vectorstore = process_youtube_video(video_id, embeddings, splitter)
-                    st.session_state.retriever = vectorstore.as_retriever(search_type='similarity', search_kwargs={'k': 4})
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    parser = StrOutputParser()
 
-                    # Create active LangChain pipeline
-                    video_parallel_chain = RunnableParallel({
-                        'context': st.session_state.retriever | RunnableLambda(format_docs),
-                        'question': RunnablePassthrough()
-                    })
-                    st.session_state.chain = video_parallel_chain | prompt | llm | parser
+    prompt = PromptTemplate(
+        template=(
+            "You are a helpful assistant. Answer ONLY from the video transcript context below. "
+            "If the context is not enough, say you don't know.\n\n"
+            "Context:\n{context}\n\n"
+            "Question : {question}\n"
+            "Answer:"
+        ),
+        input_variables=["context", "question"],
+    )
+    return embeddings, llm, splitter, parser, prompt
 
-                    # Reset Chat
-                    st.session_state.messages = []
-                    st.success("🎉 Video successfully loaded and indexed!")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-        else:
-            st.warning("Please enter a valid link/ID.")
 
-# --- Chat Space ---
-if st.session_state.chain is not None:
-    st.subheader("💬 Ask anything about this Video")
+def process_youtube_video(video_id, embeddings, splitter):
+    fetched = YouTubeTranscriptApi().fetch(video_id)
+    transcript = " ".join(snippet.text for snippet in fetched)
+    chunks = splitter.create_documents([transcript])
+    return FAISS.from_documents(chunks, embeddings)
 
-    # Show history
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
 
-    # Chat input box
-    if user_query := st.chat_input("What would you like to know?"):
-        st.session_state.messages.append({"role": "user", "content": user_query})
-        with st.chat_message("user"):
-            st.markdown(user_query)
-
-        with st.chat_message("assistant"):
-            with st.spinner("Searching and generating response..."):
-                try:
-                    raw_output = st.session_state.chain.invoke(user_query)
-
-                    # Parse out the prompt to extract the clean response
-                    marker = f"Question : {user_query}"
-                    if marker in raw_output:
-                        clean_output = raw_output.split(marker)[-1].strip()
-                    else:
-                        clean_output = raw_output.strip()
-
-                    st.markdown(clean_output)
-                    st.session_state.messages.append({"role": "assistant", "content": clean_output})
-                except Exception as e:
-                    st.error(f"Generation failed: {e}")
-else:
-    st.info("👈 Input a video link in the sidebar to generate a dynamic transcript search database!")
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
