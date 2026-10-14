@@ -15,12 +15,6 @@ st.title("📺 YouTube Video Transcript Chatbot")
 st.write("Chat with any YouTube Video using a local RAG Pipeline!")
 
 # --- Cache Models across Sessions ---
-@st.cache_resource
-def get_cached_models():
-    return load_rag_components()
-
-with st.spinner("Loading Qwen LLM & Embeddings... Please wait."):
-    embeddings, llm, splitter, parser, prompt = get_cached_models()
 
 # --- Initialize Chat & Retriever State ---
 if "retriever" not in st.session_state:
