@@ -9,8 +9,6 @@ except ImportError:
     except ImportError:
         from langchain_core.runnables.base import RunnableParallel, RunnablePassthrough, RunnableLambda
 
-from model import extract_video_id, load_rag_components, process_youtube_video, format_docs
-
 # --- Webpage Setup ---
 st.set_page_config(page_title="YouTube Chatbot RAG", page_icon="📺", layout="wide")
 st.title("📺 YouTube Video Transcript Chatbot")
