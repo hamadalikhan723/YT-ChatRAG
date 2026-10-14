@@ -1,4 +1,4 @@
-%%writefile app.py
+%writefile app.py
 import streamlit as st
 from langchain.schema.runnable import RunnableParallel, RunnablePassthrough, RunnableLambda
 from model import extract_video_id, load_rag_components, process_youtube_video, format_docs
