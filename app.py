@@ -1,6 +1,14 @@
 import streamlit as st
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough, RunnableLambda
-from model import extract_video_id, load_rag_components, process_youtube_video, format_docs
+from model import (
+    TranscriptFetchError,
+    clean_uploaded_transcript,
+    extract_video_id,
+    fetch_youtube_transcript,
+    format_docs,
+    load_rag_components,
+    process_transcript,
+)
 
 # --- Webpage Setup ---
 st.set_page_config(page_title="YouTube Chatbot RAG", page_icon="📺", layout="wide")
