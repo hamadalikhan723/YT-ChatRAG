@@ -6,16 +6,6 @@ from langchain_core.runnables import (
     RunnableLambda,
 )
 
-from model import (
-    TranscriptFetchError,
-    clean_uploaded_transcript,
-    extract_video_id,
-    fetch_youtube_transcript,
-    format_docs,
-    load_rag_components,
-    process_transcript,
-)
-
 
 # --- Page Setup ---
 st.set_page_config(
