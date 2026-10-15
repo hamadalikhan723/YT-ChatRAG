@@ -7,6 +7,9 @@ from langchain_core.runnables import (
 )
 
 
+class TranscriptFetchError(Exception):
+    """Raised when a YouTube transcript cannot be retrieved."""
+
 # --- Page Setup ---
 st.set_page_config(
     page_title="YouTube Chatbot RAG",
