@@ -1,9 +1,11 @@
 
 import re
+import time
 from urllib.parse import urlparse, parse_qs
 
+import requests
 import streamlit as st
-from youtube_transcript_api import YouTubeTranscriptApi
+
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_community.vectorstores import FAISS
@@ -12,11 +14,11 @@ from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 
 
 class TranscriptFetchError(Exception):
-    """Raised when a YouTube transcript cannot be retrieved."""
+    """Raised when a transcript cannot be retrieved."""
 
 
 def extract_video_id(url_or_id: str):
-    """Extract an 11-character YouTube video ID from a URL or plain ID."""
+    """Extract an 11-character YouTube video ID."""
     if not url_or_id or not url_or_id.strip():
         return None
 
@@ -55,62 +57,129 @@ def extract_video_id(url_or_id: str):
     return None
 
 
-@st.cache_data(ttl=86400, max_entries=200, show_spinner=False)
-def fetch_youtube_transcript(video_id: str) -> str:
-    """Fetch a transcript and cache successful results for 24 hours."""
+def _request_supadata(url, api_key):
+    """Make an authenticated Supadata API request."""
     try:
-        api = YouTubeTranscriptApi()
-        fetched = api.fetch(video_id)
+        response = requests.get(
+            url,
+            headers={"x-api-key": api_key},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
 
-        transcript = " ".join(
-            snippet.text.strip()
-            for snippet in fetched
-            if getattr(snippet, "text", "").strip()
+    except requests.RequestException as exc:
+        status = (
+            exc.response.status_code
+            if getattr(exc, "response", None) is not None
+            else None
+        )
+
+        if status == 401:
+            raise TranscriptFetchError(
+                "Supadata rejected the API key. Check Streamlit Secrets."
+            ) from exc
+
+        if status == 402:
+            raise TranscriptFetchError(
+                "Your Supadata account needs more credits or a plan update."
+            ) from exc
+
+        if status == 429:
+            raise TranscriptFetchError(
+                "Supadata rate limit reached. Please try again later."
+            ) from exc
+
+        raise TranscriptFetchError(
+            f"Supadata request failed (HTTP {status or 'connection error'})."
+        ) from exc
+
+    except ValueError as exc:
+        raise TranscriptFetchError(
+            "Supadata returned an invalid response."
+        ) from exc
+
+
+def _get_transcript_text(data):
+    """Extract plain text from Supadata's response formats."""
+    content = data.get("content", "")
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        return " ".join(
+            item.get("text", "").strip()
+            for item in content
+            if isinstance(item, dict) and item.get("text")
         ).strip()
 
-        if not transcript:
-            raise TranscriptFetchError(
-                "YouTube returned an empty transcript."
+    return ""
+
+
+@st.cache_data(ttl=86400, max_entries=200, show_spinner=False)
+def fetch_youtube_transcript(video_id: str) -> str:
+    """Fetch and cache transcripts using Supadata."""
+    api_key = st.secrets.get("SUPADATA_API_KEY", "")
+
+    if not api_key:
+        raise TranscriptFetchError(
+            "SUPADATA_API_KEY is missing from Streamlit Secrets."
+        )
+
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    data = _request_supadata(
+        "https://api.supadata.ai/v1/transcript?"
+        + requests.compat.urlencode({
+            "url": video_url,
+            "text": "true",
+            "mode": "auto",
+        }),
+        api_key,
+    )
+
+    # Larger videos may return a job ID instead of the transcript.
+    if data.get("jobId"):
+        job_id = data["jobId"]
+        deadline = time.monotonic() + 120
+
+        while time.monotonic() < deadline:
+            time.sleep(2)
+
+            result = _request_supadata(
+                f"https://api.supadata.ai/v1/transcript/{job_id}",
+                api_key,
             )
 
-        return transcript
+            status = result.get("status")
 
-    except TranscriptFetchError:
-        raise
+            if status == "completed":
+                data = result.get("result") or result
+                break
 
-    except Exception as exc:
-        error_name = type(exc).__name__
-
-        if error_name in {"RequestBlocked", "IpBlocked"}:
-            message = (
-                "YouTube is blocking transcript requests from this server. "
-                "This is a hosting/IP restriction. Try again later or upload "
-                "the transcript file instead."
-            )
-
-        elif error_name in {
-            "TranscriptsDisabled",
-            "NoTranscriptFound",
-            "VideoUnavailable",
-            "CouldNotRetrieveTranscript",
-        }:
-            message = (
-                "A transcript is unavailable for this video. Captions may "
-                "be disabled or inaccessible. You can upload a transcript "
-                "file instead."
-            )
-
+            if status == "failed":
+                raise TranscriptFetchError(
+                    "Supadata could not generate a transcript for this video."
+                )
         else:
-            message = (
-                f"Transcript retrieval failed ({error_name}). "
-                "Try again later or upload a transcript file."
+            raise TranscriptFetchError(
+                "Transcript processing took too long. Please try again."
             )
 
-        raise TranscriptFetchError(message) from exc
+    transcript = _get_transcript_text(data)
+
+    if not transcript:
+        raise TranscriptFetchError(
+            "No transcript was returned. This video may be unavailable "
+            "or its transcript could not be generated."
+        )
+
+    return transcript
 
 
 def clean_uploaded_transcript(text: str) -> str:
-    """Clean common SRT/VTT timestamps and subtitle formatting."""
+    """Clean common SRT/VTT subtitle formatting."""
     if not text:
         return ""
 
@@ -144,7 +213,7 @@ def clean_uploaded_transcript(text: str) -> str:
 
 
 def load_rag_components():
-    """Load the embedding model, Qwen LLM, text splitter, and prompt."""
+    """Load embeddings, Qwen, splitter, parser, and prompt."""
     embeddings = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
@@ -182,7 +251,7 @@ def load_rag_components():
 
 
 def process_transcript(transcript: str, embeddings, splitter):
-    """Convert transcript text into a searchable FAISS vector store."""
+    """Create a FAISS index from transcript text."""
     transcript = (transcript or "").strip()
 
     if not transcript:
@@ -197,7 +266,7 @@ def process_transcript(transcript: str, embeddings, splitter):
 
 
 def process_youtube_video(video_id, embeddings, splitter):
-    """Retrieve a transcript and create its FAISS index."""
+    """Fetch a transcript and index it in FAISS."""
     transcript = fetch_youtube_transcript(video_id)
     return process_transcript(transcript, embeddings, splitter)
 
