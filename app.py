@@ -41,7 +41,8 @@ with st.sidebar:
         if video_id:
             with st.spinner("Processing video transcript..."):
                 try:
-                    vectorstore = process_youtube_video(video_id, embeddings, splitter)
+                    transcript = fetch_youtube_transcript(video_id)
+                    vectorstore = process_transcript(transcript, embeddings, splitter)
                     st.session_state.retriever = vectorstore.as_retriever(search_type='similarity', search_kwargs={'k': 4})
 
                     # Create active LangChain pipeline
