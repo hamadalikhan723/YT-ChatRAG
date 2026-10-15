@@ -1,218 +1,207 @@
 
+import re
+from urllib.parse import urlparse, parse_qs
+
 import streamlit as st
-from langchain_core.runnables import (
-    RunnableParallel,
-    RunnablePassthrough,
-    RunnableLambda,
-)
+from youtube_transcript_api import YouTubeTranscriptApi
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 
 
 class TranscriptFetchError(Exception):
     """Raised when a YouTube transcript cannot be retrieved."""
 
-# --- Page Setup ---
-st.set_page_config(
-    page_title="YouTube Chatbot RAG",
-    page_icon="📺",
-    layout="wide",
-)
 
-st.title("📺 YouTube Video Transcript Chatbot")
-st.write(
-    "Chat with a YouTube video using a local RAG pipeline."
-)
+def extract_video_id(url_or_id: str):
+    """Extract an 11-character YouTube video ID from a URL or plain ID."""
+    if not url_or_id or not url_or_id.strip():
+        return None
 
-# --- Initialize Session State ---
-defaults = {
-    "retriever": None,
-    "chain": None,
-    "messages": [],
-    "active_video_id": None,
-    "active_source": None,
-}
+    value = url_or_id.strip()
 
-for key, default_value in defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = default_value
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
+        return value
 
+    candidate = value if "://" in value else f"https://{value}"
 
-# --- Build the RAG Chain ---
-def index_transcript(transcript, source_label, video_id=None):
-    """Index transcript text and activate the chat chain."""
+    try:
+        parsed = urlparse(candidate)
+    except ValueError:
+        return None
 
-    vectorstore = process_transcript(
-        transcript,
-        embeddings,
-        splitter,
-    )
+    host = (parsed.hostname or "").lower()
+    video_id = None
 
-    retriever = vectorstore.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": 4},
-    )
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/")[0]
 
-    video_parallel_chain = RunnableParallel(
-        {
-            "context": retriever | RunnableLambda(format_docs),
-            "question": RunnablePassthrough(),
-        }
-    )
-
-    st.session_state.retriever = retriever
-    st.session_state.chain = (
-        video_parallel_chain | prompt | llm | parser
-    )
-    st.session_state.messages = []
-    st.session_state.active_video_id = video_id
-    st.session_state.active_source = source_label
-
-
-# --- Sidebar ---
-with st.sidebar:
-    st.header("1. Load YouTube Video")
-
-    video_input = st.text_input(
-        "Paste YouTube link or video ID",
-        value="ynbvBYtqwYY",
-        help=(
-            "Supports YouTube watch links, youtu.be links, "
-            "Shorts, embed links, and video IDs."
-        ),
-    )
-
-    if st.button(
-        "Load & Index Video",
-        type="primary",
-        use_container_width=True,
-    ):
-        video_id = extract_video_id(video_input)
-
-        if not video_id:
-            st.warning(
-                "Please enter a valid YouTube URL or 11-character video ID."
+    elif host == "youtube.com" or host.endswith(".youtube.com"):
+        if parsed.path == "/watch":
+            video_id = parse_qs(parsed.query).get("v", [None])[0]
+        else:
+            match = re.match(
+                r"^/(?:shorts|embed|live|v)/([^/?]+)",
+                parsed.path,
             )
+            if match:
+                video_id = match.group(1)
+
+    if video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return video_id
+
+    return None
+
+
+@st.cache_data(ttl=86400, max_entries=200, show_spinner=False)
+def fetch_youtube_transcript(video_id: str) -> str:
+    """Fetch a transcript and cache successful results for 24 hours."""
+    try:
+        api = YouTubeTranscriptApi()
+        fetched = api.fetch(video_id)
+
+        transcript = " ".join(
+            snippet.text.strip()
+            for snippet in fetched
+            if getattr(snippet, "text", "").strip()
+        ).strip()
+
+        if not transcript:
+            raise TranscriptFetchError(
+                "YouTube returned an empty transcript."
+            )
+
+        return transcript
+
+    except TranscriptFetchError:
+        raise
+
+    except Exception as exc:
+        error_name = type(exc).__name__
+
+        if error_name in {"RequestBlocked", "IpBlocked"}:
+            message = (
+                "YouTube is blocking transcript requests from this server. "
+                "This is a hosting/IP restriction. Try again later or upload "
+                "the transcript file instead."
+            )
+
+        elif error_name in {
+            "TranscriptsDisabled",
+            "NoTranscriptFound",
+            "VideoUnavailable",
+            "CouldNotRetrieveTranscript",
+        }:
+            message = (
+                "A transcript is unavailable for this video. Captions may "
+                "be disabled or inaccessible. You can upload a transcript "
+                "file instead."
+            )
+
         else:
-            try:
-                with st.spinner(
-                    "Retrieving transcript and building search index..."
-                ):
-                    transcript = fetch_youtube_transcript(video_id)
+            message = (
+                f"Transcript retrieval failed ({error_name}). "
+                "Try again later or upload a transcript file."
+            )
 
-                    index_transcript(
-                        transcript,
-                        source_label="YouTube transcript",
-                        video_id=video_id,
-                    )
+        raise TranscriptFetchError(message) from exc
 
-                st.success("Video transcript indexed successfully!")
 
-            except TranscriptFetchError as exc:
-                st.error(str(exc))
-                st.info(
-                    "You can upload a transcript below if YouTube blocks "
-                    "the request or captions are unavailable."
-                )
+def clean_uploaded_transcript(text: str) -> str:
+    """Clean common SRT/VTT timestamps and subtitle formatting."""
+    if not text:
+        return ""
 
-            except Exception as exc:
-                st.error("The video could not be indexed.")
-                st.exception(exc)
+    cleaned_lines = []
 
-    st.divider()
-    st.header("Or upload a transcript")
+    timestamp_pattern = re.compile(
+        r"^\s*(?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{3}\s*-->\s*"
+    )
 
-    uploaded_file = st.file_uploader(
-        "Transcript file (.txt, .srt, or .vtt)",
-        type=["txt", "srt", "vtt"],
-        help=(
-            "Use this fallback when YouTube transcript retrieval fails."
+    for line in text.replace("\ufeff", "").splitlines():
+        line = line.strip()
+
+        if not line or line.upper() == "WEBVTT":
+            continue
+
+        if re.fullmatch(r"\d+", line):
+            continue
+
+        if timestamp_pattern.match(line) or "-->" in line:
+            continue
+
+        if line.startswith(("NOTE ", "Kind:", "Language:")):
+            continue
+
+        line = re.sub(r"<[^>]+>", "", line).strip()
+
+        if line:
+            cleaned_lines.append(line)
+
+    return " ".join(cleaned_lines).strip()
+
+
+def load_rag_components():
+    """Load the embedding model, Qwen LLM, text splitter, and prompt."""
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+    llm = HuggingFacePipeline.from_model_id(
+        model_id="Qwen/Qwen2.5-0.5B-Instruct",
+        task="text-generation",
+        pipeline_kwargs={
+            "max_new_tokens": 256,
+            "do_sample": False,
+            "return_full_text": False,
+        },
+    )
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+    )
+
+    parser = StrOutputParser()
+
+    prompt = PromptTemplate(
+        template=(
+            "You are a helpful assistant. Answer only using the video "
+            "transcript context below. If the answer is not in the context, "
+            "say you don't know based on this transcript.\n\n"
+            "Context:\n{context}\n\n"
+            "Question: {question}\n"
+            "Answer:"
         ),
+        input_variables=["context", "question"],
     )
 
-    if st.button(
-        "Index Uploaded Transcript",
-        use_container_width=True,
-    ):
-        if uploaded_file is None:
-            st.warning("Please choose a transcript file first.")
-        else:
-            try:
-                raw_text = uploaded_file.getvalue().decode(
-                    "utf-8-sig",
-                    errors="replace",
-                )
-
-                transcript = clean_uploaded_transcript(raw_text)
-
-                with st.spinner(
-                    "Building search index from uploaded transcript..."
-                ):
-                    index_transcript(
-                        transcript,
-                        source_label=f"Uploaded: {uploaded_file.name}",
-                    )
-
-                st.success("Uploaded transcript indexed successfully!")
-
-            except Exception as exc:
-                st.error(
-                    f"Could not process the uploaded transcript: {exc}"
-                )
+    return embeddings, llm, splitter, parser, prompt
 
 
-# --- Chat Interface ---
-if st.session_state.chain is not None:
-    st.subheader("💬 Ask anything about this video")
+def process_transcript(transcript: str, embeddings, splitter):
+    """Convert transcript text into a searchable FAISS vector store."""
+    transcript = (transcript or "").strip()
 
-    st.caption(
-        f"Active source: "
-        f"{st.session_state.active_source or 'Transcript'}"
-    )
+    if not transcript:
+        raise ValueError("The transcript is empty.")
 
-    # Display conversation history.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    chunks = splitter.create_documents([transcript])
 
-    # Accept a new question.
-    user_query = st.chat_input(
-        "What would you like to know?"
-    )
+    if not chunks:
+        raise ValueError("No text chunks could be created.")
 
-    if user_query:
-        st.session_state.messages.append(
-            {"role": "user", "content": user_query}
-        )
+    return FAISS.from_documents(chunks, embeddings)
 
-        with st.chat_message("user"):
-            st.markdown(user_query)
 
-        with st.chat_message("assistant"):
-            with st.spinner(
-                "Searching the transcript and generating an answer..."
-            ):
-                try:
-                    raw_output = st.session_state.chain.invoke(
-                        user_query
-                    )
+def process_youtube_video(video_id, embeddings, splitter):
+    """Retrieve a transcript and create its FAISS index."""
+    transcript = fetch_youtube_transcript(video_id)
+    return process_transcript(transcript, embeddings, splitter)
 
-                    clean_output = str(raw_output).strip()
 
-                    st.markdown(clean_output)
-
-                    st.session_state.messages.append(
-                        {
-                            "role": "assistant",
-                            "content": clean_output,
-                        }
-                    )
-
-                except Exception as exc:
-                    st.error(
-                        f"Answer generation failed: {exc}"
-                    )
-
-else:
-    st.info(
-        "👈 Load a YouTube video from the sidebar or upload a "
-        "transcript file to start chatting."
-    )
+def format_docs(docs):
+    """Format retrieved documents for the RAG prompt."""
+    return "\n\n".join(doc.page_content for doc in docs)
