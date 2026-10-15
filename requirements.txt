@@ -1,4 +1,6 @@
-streamlit
+
+streamlit>=1.36.0
+youtube-transcript-api>=1.0.0,<2.0.0
 langchain-core
 langchain-community
 langchain-text-splitters
@@ -7,4 +9,5 @@ transformers
 torch
 sentence-transformers
 faiss-cpu
-youtube-transcript-api>=1.0
+accelerate
+
