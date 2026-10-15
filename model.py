@@ -19,24 +19,6 @@ st.write(
     "Chat with a YouTube video using a local RAG pipeline."
 )
 
-
-# --- Cache Models Across Sessions ---
-@st.cache_resource(show_spinner="Loading Qwen LLM and embeddings...")
-def get_cached_models():
-    return load_rag_components()
-
-
-try:
-    embeddings, llm, splitter, parser, prompt = get_cached_models()
-except Exception as exc:
-    st.error(
-        "The language model or embeddings could not be loaded. "
-        "Check the deployment logs and available memory."
-    )
-    st.exception(exc)
-    st.stop()
-
-
 # --- Initialize Session State ---
 defaults = {
     "retriever": None,
