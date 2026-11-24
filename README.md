@@ -1,88 +1,61 @@
+# YouTube Transcript Chatbot (RAG)
 
-# 📺 YouTube Video Transcript Chatbot (RAG System)
+A Streamlit application for asking grounded questions about YouTube videos. It fetches a transcript, creates searchable chunks, retrieves relevant passages with FAISS, and streams answers from a hosted language model.
 
-A Streamlit application that lets users ask questions about YouTube videos using a Retrieval-Augmented Generation (RAG) pipeline.
+## Architecture
 
-The application uses:
-- **Streamlit** for the web interface
-- **YouTube Transcript API** to retrieve available video transcripts
-- **Hugging Face Embeddings** (`all-MiniLM-L6-v2`) for semantic search
-- **FAISS** as the vector database
-- **LangChain** to connect retrieval and generation
-- **Qwen2.5-0.5B-Instruct** as the local language model
+- UI: Streamlit
+- Transcript ingestion: Supadata API, with TXT/SRT/VTT upload fallback
+- Embeddings: sentence-transformers/all-MiniLM-L6-v2 (cached on the app server)
+- Vector store: FAISS
+- Retrieval: Maximum Marginal Relevance (MMR), up to five diverse relevant chunks
+- LLM: openai/gpt-oss-20b through Groq API
+- Orchestration: LangChain message-based prompt and streaming
 
-## Project Files
+## Why the pipeline changed
 
-- `app.py` — Streamlit interface, chat history, transcript upload, and RAG chain
-- `model.py` — Transcript retrieval, caching, preprocessing, model loading, and FAISS indexing
-- `requirements.txt` — Required Python packages
-- `README.md` — Project documentation
+The previous version ran Qwen2.5-0.5B-Instruct locally through Transformers on Streamlit Community Cloud. Small local models running on CPU can be slow and may struggle to produce useful, grounded answers. This version uses hosted inference and streams generated tokens to the interface.
 
-## Improvements
+## Configure Streamlit Secrets
 
-### 1. Transcript caching
+In Streamlit Community Cloud, open the app's Settings → Secrets and add:
 
-Successfully retrieved transcripts are cached in Streamlit for up to 24 hours. Repeated requests for the same video can reuse the cached transcript rather than sending another request to YouTube.
+```toml
+GROQ_API_KEY = "your_groq_api_key"
+SUPADATA_API_KEY = "your_supadata_api_key"
+```
 
-**Note:** Streamlit's cache is temporary. It may be cleared when the app restarts or is redeployed. This is not permanent transcript storage.
+GROQ_API_KEY is required for answer generation. Get a key from https://console.groq.com/keys.
 
-### 2. Clearer error handling
+SUPADATA_API_KEY is required for automatic YouTube transcript retrieval. If you do not have it, upload a TXT, SRT, or VTT transcript instead.
 
-The app displays more understandable messages when:
-- YouTube blocks transcript requests from the hosting server
-- Captions are disabled or unavailable
-- A video ID or URL is invalid
-- Another transcript retrieval error occurs
+Never commit API keys to GitHub.
 
-### 3. Transcript upload fallback
-
-If YouTube retrieval fails, upload a transcript in one of these formats:
-- `.txt`
-- `.srt`
-- `.vtt`
-
-The application cleans common subtitle timestamps and builds the same FAISS search index from the uploaded text.
-
-### 4. Existing RAG pipeline preserved
-
-The application continues to use semantic retrieval, FAISS, LangChain, and the Qwen language model.
-
-## Installation and Local Usage
-
-Create and activate a virtual environment, then install the dependencies:
+## Run locally
 
 ```bash
 pip install -r requirements.txt
-```
-
-Start the app:
-
-```bash
 streamlit run app.py
 ```
 
-## Deploy on Streamlit Community Cloud
+Set the same variables in your environment or a local Streamlit secrets file.
 
-1. Push `app.py`, `model.py`, `requirements.txt`, and `README.md` to your GitHub repository.
-2. Visit [Streamlit Community Cloud](https://share.streamlit.io/).
-3. Create a new app and select your repository and branch.
-4. Set the main file path to `app.py`.
-5. Deploy the app.
-6. If deployment fails, inspect the app logs for dependency, memory, or model-loading errors.
+## Retrieval and answer-quality improvements
 
-## How to Use
+- Transcript chunks use 850-character windows with 130-character overlap and paragraph/sentence-aware splitting.
+- Embeddings are normalized and loaded once per server process.
+- FAISS uses MMR retrieval (k=5, fetch_k=18) to reduce redundant passages.
+- The prompt requires answers to stay grounded in retrieved evidence, acknowledge missing information, and cite chunk numbers.
+- Recent chat turns are included so follow-up questions can resolve references.
+- Retrieved passages are expandable in the UI for verification.
 
-1. Paste a YouTube URL or video ID in the sidebar.
-2. Click **Load & Index Video**.
-3. Wait for transcript retrieval and vector indexing to finish.
-4. Ask questions in the chat interface.
+## Performance notes
 
-If transcript retrieval fails, upload a transcript file from the sidebar and click **Index Uploaded Transcript**.
+The first app startup may take longer while the embedding model is downloaded. Subsequent sessions can reuse Streamlit's resource cache while the server process remains alive. Answer generation uses Groq-hosted inference rather than loading a generative model into Streamlit server CPU memory. Actual latency depends on network conditions, provider availability, and account limits.
 
-## Important Limitations
+## Limitations
 
-YouTube may block requests from cloud-hosted server IP addresses. Caching reduces repeated requests but cannot bypass those restrictions or guarantee transcript access for new videos.
-
-For more dependable access to new videos, consider a legitimate alternative transcript provider or an audio-transcription service where you have the necessary rights to process the content.
-
-The first launch may take time because the embedding model and Qwen model must be downloaded and loaded. Available RAM and CPU on the hosting platform can affect startup and response speed.
+- Answer quality depends on transcript quality and whether retrieval finds the right passages.
+- The chatbot cannot reliably answer details absent from the transcript.
+- Streamlit cache is temporary and may be cleared when the app restarts or is redeployed.
+- Supadata availability, quotas, and YouTube transcript access can affect ingestion.
