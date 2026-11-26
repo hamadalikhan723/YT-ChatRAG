@@ -8,8 +8,8 @@ from model import (
 )
 
 st.set_page_config(page_title="YouTube Transcript Chat", page_icon="📺", layout="wide")
-st.title("📺 YouTube Video Transcript Chatbot")
-st.caption("Ask questions and get answers grounded in the video's transcript.")
+st.title("🤖 AI-Powered Document & YouTube Chatbot")
+st.caption("Ask questions and get accurate, context-aware answers from your knowledge sources.")
 
 
 def get_secret(name):
@@ -92,7 +92,7 @@ with st.sidebar:
         st.session_state.messages = []
 
 if st.session_state.retriever is None:
-    st.info("Load a YouTube video or upload a transcript from the sidebar to begin.")
+    st.info("Load a YouTube video or upload a text document from the sidebar to get started.")
     st.stop()
 
 for message in st.session_state.messages:
